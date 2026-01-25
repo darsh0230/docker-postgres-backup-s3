@@ -31,7 +31,7 @@ services:
             - POSTGRES_DB=database
             - POSTGRES_USER=username
             - POSTGRES_PASSWORD=password
-         #  - POSTGRES_PASSWORD_FILE=/run/secrets/db_password <-- alternative for POSTGRES_PASSWORD (to use with docker secrets)
+         #  - POSTGRES_PASSWORD_FILE=/run/secrets/db_password <-- alternative for POSTGRES_PASSWORD (to use with docker secrets, remember to remove EOF newlines)
     pgbackups:
         image: prodrigestivill/postgres-backup-local
         restart: always
@@ -47,7 +47,7 @@ services:
             - POSTGRES_DB=database
             - POSTGRES_USER=username
             - POSTGRES_PASSWORD=password
-         #  - POSTGRES_PASSWORD_FILE=/run/secrets/db_password <-- alternative for POSTGRES_PASSWORD (to use with docker secrets)
+         #  - POSTGRES_PASSWORD_FILE=/run/secrets/db_password <-- alternative for POSTGRES_PASSWORD (to use with docker secrets, remember to remove EOF newlines)
             - POSTGRES_EXTRA_OPTS=-Z1 --schema=public --blobs
             - SCHEDULE=@daily
             - BACKUP_ON_START=TRUE
@@ -84,16 +84,16 @@ Most variables are the same as in the [official postgres image](https://hub.dock
 | VALIDATE_ON_START | If set to `FALSE` does not validate the configuration on start. Disabling this is not recommended. Defaults to `TRUE`. |
 | HEALTHCHECK_PORT | Port listening for cron-schedule health check. Defaults to `8080`. |
 | POSTGRES_DB | Comma or space separated list of postgres databases to backup. If POSTGRES_CLUSTER is set this refers to the database to connect to for dumping global objects and discovering what other databases should be dumped (typically is either `postgres` or `template1`). Required. |
-| POSTGRES_DB_FILE | Alternative to POSTGRES_DB, but with one database per line, for usage with docker secrets. |
+| POSTGRES_DB_FILE | Alternative to POSTGRES_DB, but with one database per line, for usage with docker secrets (remember to remove EOF newlines). |
 | POSTGRES_EXTRA_OPTS | Additional [options](https://www.postgresql.org/docs/12/app-pgdump.html#PG-DUMP-OPTIONS) for `pg_dump` (or `pg_dumpall` [options](https://www.postgresql.org/docs/12/app-pg-dumpall.html#id-1.9.4.13.6) if POSTGRES_CLUSTER is set). Defaults to `-Z1`. |
 | POSTGRES_CLUSTER | Set to `TRUE` in order to use `pg_dumpall` instead. Also set POSTGRES_EXTRA_OPTS to any value or empty since the default value is not compatible with `pg_dumpall`. |
 | POSTGRES_HOST | Postgres connection parameter; postgres host to connect to. Required. |
 | POSTGRES_PASSWORD | Postgres connection parameter; postgres password to connect with. Required. |
-| POSTGRES_PASSWORD_FILE | Alternative to POSTGRES_PASSWORD, for usage with docker secrets. |
+| POSTGRES_PASSWORD_FILE | Alternative to POSTGRES_PASSWORD, for usage with docker secrets (remember to remove EOF newlines). |
 | POSTGRES_PASSFILE_STORE | Alternative to POSTGRES_PASSWORD in [passfile format](https://www.postgresql.org/docs/12/libpq-pgpass.html#LIBPQ-PGPASS), for usage with postgres clusters. |
 | POSTGRES_PORT | Postgres connection parameter; postgres port to connect to. Defaults to `5432`. |
 | POSTGRES_USER | Postgres connection parameter; postgres user to connect with. Required. |
-| POSTGRES_USER_FILE | Alternative to POSTGRES_USER, for usage with docker secrets. |
+| POSTGRES_USER_FILE | Alternative to POSTGRES_USER, for usage with docker secrets (remember to remove EOF newlines). |
 | SCHEDULE | [Cron-schedule](http://godoc.org/github.com/robfig/cron#hdr-Predefined_schedules) specifying the interval between postgres backups. Defaults to `@daily`. |
 | TZ | [POSIX TZ variable](https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html) specifying the timezone used to evaluate SCHEDULE cron (example "Europe/Paris"). |
 | WEBHOOK_URL | URL to be called after an error or after a successful backup (POST with a JSON payload, check `hooks/00-webhook` file for more info). Default disabled. |
