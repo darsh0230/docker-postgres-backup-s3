@@ -4,8 +4,9 @@ FROM postgres:$BASETAG
 ARG GOCRONVER=v0.0.11
 ARG TARGETOS
 ARG TARGETARCH
+# Install aws-cli and dos2unix (to fix any windows line endings from host)
 RUN set -x \
-	&& apk update && apk add ca-certificates curl aws-cli \
+	&& apk update && apk add ca-certificates curl aws-cli dos2unix \
 	&& curl --fail --retry 4 --retry-all-errors -L https://github.com/prodrigestivill/go-cron/releases/download/$GOCRONVER/go-cron-$TARGETOS-$TARGETARCH-static.gz | zcat > /usr/local/bin/go-cron \
 	&& chmod a+x /usr/local/bin/go-cron
 
@@ -40,6 +41,10 @@ ENV POSTGRES_DB="**None**" \
 COPY hooks /hooks
 COPY upload-to-s3.sh /hooks/01-upload-to-s3
 COPY backup.sh env.sh init.sh /
+
+# Force all scripts to unix line endings and executable
+RUN dos2unix /hooks/* /backup.sh /env.sh /init.sh || true \
+    && chmod +x /hooks/* /backup.sh /env.sh /init.sh
 
 VOLUME /backups
 
