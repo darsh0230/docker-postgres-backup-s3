@@ -11,11 +11,11 @@ if [ "${HOOK_TYPE}" != "post-backup" ]; then
 fi
 
 if [ -z "${S3_BACKUP_PATH:-}" ]; then
-  echo "[s3-upload] S3_BACKUP_PATH is not set — skipping upload."
+  echo "[s3-upload] S3_BACKUP_PATH is not set - skipping upload."
   exit 0
 fi
 
-echo "[s3-upload] Syncing /backups → ${S3_BACKUP_PATH} ..."
+echo "[s3-upload] Syncing /backups -> ${S3_BACKUP_PATH} ..."
 aws s3 sync /backups "${S3_BACKUP_PATH}" \
   --storage-class STANDARD_IA \
   --only-show-errors
