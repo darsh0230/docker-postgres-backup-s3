@@ -18,6 +18,8 @@ fi
 echo "[s3-upload] Syncing /backups -> ${S3_BACKUP_PATH} ..."
 aws s3 sync /backups "${S3_BACKUP_PATH}" \
   --storage-class STANDARD_IA \
+  --exclude "last/*" \
+  --exclude "*-latest.sql.gz" \
   --only-show-errors
 
 echo "[s3-upload] Done."
