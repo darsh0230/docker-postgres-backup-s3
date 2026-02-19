@@ -19,7 +19,7 @@ RUN set -x \
 #
 
 RUN set -x \
-	&& apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && apt-get clean && rm -rf /var/lib/apt/lists/* \
+	&& apt-get update && apt-get install -y --no-install-recommends ca-certificates curl awscli && apt-get clean && rm -rf /var/lib/apt/lists/* \
 	&& curl --fail --retry 4 --retry-all-errors -o /usr/local/bin/go-cron.gz -L https://github.com/prodrigestivill/go-cron/releases/download/$GOCRONVER/go-cron-$TARGETOS-$TARGETARCH.gz \
 	&& gzip -vnd /usr/local/bin/go-cron.gz && chmod a+x /usr/local/bin/go-cron
 
@@ -52,6 +52,7 @@ ENV POSTGRES_DB="**None**" \
     WEBHOOK_EXTRA_ARGS=""
 
 COPY hooks /hooks
+COPY upload-to-s3.sh /hooks/01-upload-to-s3
 COPY backup.sh env.sh init.sh /
 
 VOLUME /backups

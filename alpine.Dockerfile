@@ -5,7 +5,7 @@ ARG GOCRONVER=v0.0.11
 ARG TARGETOS
 ARG TARGETARCH
 RUN set -x \
-	&& apk update && apk add ca-certificates curl \
+	&& apk update && apk add ca-certificates curl aws-cli \
 	&& curl --fail --retry 4 --retry-all-errors -L https://github.com/prodrigestivill/go-cron/releases/download/$GOCRONVER/go-cron-$TARGETOS-$TARGETARCH-static.gz | zcat > /usr/local/bin/go-cron \
 	&& chmod a+x /usr/local/bin/go-cron
 
@@ -38,6 +38,7 @@ ENV POSTGRES_DB="**None**" \
     WEBHOOK_EXTRA_ARGS=""
 
 COPY hooks /hooks
+COPY upload-to-s3.sh /hooks/01-upload-to-s3
 COPY backup.sh env.sh init.sh /
 
 VOLUME /backups

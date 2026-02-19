@@ -1,0 +1,311 @@
+networks:
+  web: {}
+  internal: {}
+
+volumes:
+  pg_secret:
+    driver: local
+  traefik_letsencrypt:
+    driver: local
+  cwagent_config:
+  cwagent_state:
+
+
+services:
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+    ports: ["80:80","443:443"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+    networks: [web]
+
+  app:
+    image: ${ECR_IMAGE}
+    restart: unless-stopped
+    environment:
+      - AWS_REGION=${AWS_REGION}
+      - APP_PORT=${APP_PORT:-5000}
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - REDIS_URL=redis://redis:6379/
+      - LOG_DIR=/app/logs
+    # write file logs to a host path so cwagent can read them
+    volumes:
+      - /var/lib/app-logs:/app/logs
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent http://127.0.0.1:${APP_PORT:-5000}/api/health >/dev/null || exit 1
+      interval: 60s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    expose:
+      - "${APP_PORT:-5000}"
+    networks: [web, internal]
+    labels:
+      - traefik.enable=true
+
+      ###########################################################################
+      # PUBLIC ROUTER — HTTPS with Let's Encrypt + HTTP→HTTPS redirect
+      ###########################################################################
+
+      # Public HTTPS router
+      - traefik.http.routers.app.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.app.entrypoints=websecure
+      - traefik.http.routers.app.tls.certresolver=le
+      - traefik.http.routers.app.middlewares=redirect-to-https
+
+      # Redirect only applies to public domain
+      - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
+      - traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true
+
+      ###########################################################################
+      # INTERNAL ROUTER — HTTP only, no TLS, NO redirect
+      ###########################################################################
+
+      - traefik.http.routers.app-internal.rule=Host(`${INTERNAL_DOMAIN}`)
+      - traefik.http.routers.app-internal.entrypoints=web
+      - traefik.http.routers.app-internal.service=app
+
+      ###########################################################################
+      # SHARED SERVICE SETTINGS
+      ###########################################################################
+
+      - traefik.http.services.app.loadbalancer.server.port=${APP_PORT:-5000}
+      - traefik.http.services.app.loadbalancer.healthcheck.path=/api/health
+      - traefik.http.services.app.loadbalancer.healthcheck.interval=10s
+      - traefik.http.services.app.loadbalancer.healthcheck.timeout=3s
+
+      ###########################################################################
+      # DOCKER NETWORK + WATCHTOWER HOOKS
+      ###########################################################################
+
+      - traefik.docker.network=${COMPOSE_PROJECT_NAME:-nova}_web
+      - com.centurylinklabs.watchtower.enable=true
+      - "com.centurylinklabs.watchtower.lifecycle.post-update=/bin/sh -c \"curl --fail --silent http://127.0.0.1:${APP_PORT:-5000}/api/health >/dev/null || exit 1\""
+
+  migration:
+    image: ${ECR_DATAWEAVE_IMAGE}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  secrets-init:
+    image: amazon/aws-cli
+    entrypoint: [] 
+    network_mode: host                   # <-- allows access to metadata service
+    environment:
+      - AWS_EC2_METADATA_DISABLED=false  # <-- tells aws-cli to use instance role
+      - AWS_DEFAULT_REGION=ap-south-1
+      - DATABASE_PASSWORD_PARAM=/prod/nova/DATABASE_PASSWORD
+      - WATCHTOWER_BOT_TOKEN_PARAM=/prod/nova/WATCHTOWER_BOT_TOKEN
+      - WATCHTOWER_CHAT_ID_PARAM=/prod/nova/WATCHTOWER_CHAT_ID
+    command: >
+      /bin/sh -c "set -euo pipefail;
+      fetch_secret() {
+        aws ssm get-parameter --with-decryption --name \"$1\" --query Parameter.Value --output text;
+      };
+      fetch_secret \"$$DATABASE_PASSWORD_PARAM\" > /secrets/pg_password;
+      fetch_secret \"$$WATCHTOWER_BOT_TOKEN_PARAM\" > /secrets/watchtower_bot_token;
+      fetch_secret \"$$WATCHTOWER_CHAT_ID_PARAM\" > /secrets/watchtower_chat_id;
+      chmod 0444 /secrets/pg_password /secrets/watchtower_bot_token /secrets/watchtower_chat_id"
+    volumes:
+      - pg_secret:/secrets
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=${DATABASE_NAME}
+      - POSTGRES_PASSWORD_FILE=/secrets/pg_password
+    volumes:
+      - type: bind
+        source: /pgdata/postgres
+        target: /var/lib/postgresql/data
+      - pg_secret:/secrets:ro
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U postgres -d ${DATABASE_NAME:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # ---------------------------------------------------------------------------
+  # Postgres backup — dumps to /pgbackups locally, then syncs to S3.
+  # AWS credentials are picked up automatically from the EC2 instance role
+  # No AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY needed.
+  # ---------------------------------------------------------------------------
+  pgbackup:
+    image: prodrigestivill/postgres-backup-local:latest
+    restart: unless-stopped
+    user: root                            # needed so the hook can run apk/aws
+    networks: [internal]                  # bridge network can reach EC2 IMDS (same as cwagent)
+    environment:
+      - AWS_EC2_METADATA_DISABLED=false   # tell awscli to use the instance role
+      - AWS_DEFAULT_REGION=${AWS_REGION}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${DATABASE_NAME}
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD_FILE=/secrets/pg_password
+      - POSTGRES_EXTRA_OPTS=-Z1 --schema=public --blobs
+      - SCHEDULE=${BACKUP_SCHEDULE:-@daily}
+      - BACKUP_ON_START=${BACKUP_ON_START:-TRUE}
+      - BACKUP_KEEP_DAYS=${BACKUP_KEEP_DAYS:-7}
+      - BACKUP_KEEP_WEEKS=${BACKUP_KEEP_WEEKS:-4}
+      - BACKUP_KEEP_MONTHS=${BACKUP_KEEP_MONTHS:-6}
+      # S3 destination — set in .env, e.g. s3://my-bucket/postgres-backups/
+      - S3_BACKUP_PATH=${S3_BACKUP_PATH}
+    volumes:
+      - /pgbackups:/backups               # local staging area for backups
+      - pg_secret:/secrets:ro             # shared volume with pg password file
+      - ./upload-to-s3.sh:/hooks/01-upload-to-s3:ro  # post-backup S3 sync hook
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: [
+      "redis-server",
+      "--appendonly", "yes",
+      "--notify-keyspace-events", "KEA"
+    ]
+    ports:
+      - "6379:6379"
+    networks: [internal]
+    healthcheck:
+      test: ["CMD","redis-cli","ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    entrypoint: ["/busybox", "sh", "/usr/local/bin/watchtower-entrypoint.sh"]
+    command: ["--label-enable","--include-stopped","--cleanup","--interval=300","--rolling-restart","--enable-lifecycle-hooks"]
+    environment:
+      AWS_REGION: ${AWS_REGION}
+      DOCKER_CONFIG: /run/docker-config
+      WATCHTOWER_NOTIFICATION_REPORT_CHANGE_ONLY: "true"
+      WATCHTOWER_NOTIFICATION_REPORT: "true"
+      WATCHTOWER_NOTIFICATIONS: shoutrrr
+      WATCHTOWER_NOTIFICATION_STARTUP_MESSAGE: "true"
+      WATCHTOWER_NOTIFICATION_TEMPLATE: |
+        {{- if .Report -}}
+          {{- if or (gt (len .Report.Updated) 0) (gt (len .Report.Skipped) 0) (gt (len .Report.Failed) 0) -}}
+        
+        🔔 **Watchtower Report for**: `{{.Host}}`
+        **Scanned:** {{len .Report.Scanned}}  
+        **Updated:** {{len .Report.Updated}}  
+        {{- if .Report.Failed }}
+        **Failed:** {{len .Report.Failed}}
+        {{- end }}
+        {{- if .Report.Updated }}
+        
+        **✅ Updated Containers**
+        {{- range .Report.Updated }}
+          • {{.Name}} → `{{.ImageName}}`
+        {{- end }}
+        {{- end }}
+        {{- if .Report.Skipped }}
+        
+        **⏭ Skipped**
+        {{- range .Report.Skipped }}
+          • {{.Name}} → `{{.ImageName}}` _(Reason: {{.Error}})_
+        {{- end }}
+        {{- end }}
+        {{- if .Report.Failed }}
+        
+        **❌ Failed**
+        {{- range .Report.Failed }}
+          • {{.Name}} → `{{.ImageName}}` _(Error: {{.Error}})_
+        {{- end }}
+        {{- end }}
+        
+        🔁 *Watchtower auto-update cycle complete.*
+          {{- end -}}
+        {{- else }}
+        {{- range .Entries }}
+        {{ .Message }}
+        {{- end }}
+        {{- end -}}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - pg_secret:/run/secrets:ro
+      - /home/ubuntu/.docker:/run/docker-config:ro
+      - /home/ubuntu/app/watchtower-entrypoint.sh:/usr/local/bin/watchtower-entrypoint.sh:ro
+      - /bin/busybox:/busybox:ro
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+
+  cwagent-config:
+    image: alpine:3.20
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/generate-cwagent-config.sh
+    environment:
+      - CWAGENT_LOG_GROUP=${CWAGENT_LOG_GROUP:-/prod/nova}
+      - CWAGENT_LOG_STREAM=${CWAGENT_LOG_STREAM:-}
+      - CWAGENT_LOG_FILE_PATTERN=${CWAGENT_LOG_FILE_PATTERN:-/var/lib/app-logs/app.log*}
+      - CWAGENT_METRICS_INTERVAL=${CWAGENT_METRICS_INTERVAL:-60}
+    volumes:
+      - cwagent_config:/config
+      - ./cwagent-generate-config.sh:/usr/local/bin/generate-cwagent-config.sh:ro
+    restart: "no"
+
+  # cloudwatch agent tails /var/lib/app-logs
+  cwagent:
+    image: public.ecr.aws/cloudwatch-agent/cloudwatch-agent:latest
+    restart: unless-stopped
+    user: "0"
+    volumes:
+      - /var/lib/app-logs:/var/lib/app-logs:ro
+      - cwagent_config:/etc/cwagentconfig
+      - cwagent_state:/opt/aws/amazon-cloudwatch-agent/logs
+    environment:
+      - AWS_REGION=${AWS_REGION}
+      - AWS_EC2_METADATA_DISABLED=false
+    depends_on:
+      cwagent-config:
+        condition: service_completed_successfully
+      app:
+        condition: service_started
+    networks: [internal]
